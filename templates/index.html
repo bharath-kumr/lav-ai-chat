@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lav - AI Dev Companion</title>
+<style>
+  :root { --bg:#0f1117; --panel:#171a23; --line:#262b38; --text:#e6e8ee; --muted:#8b93a7; --accent:#7c6cff; --user:#2b2f45; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); height:100vh; }
+  button { cursor:pointer; font:inherit; }
+  input,textarea { font:inherit; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 12px; outline:none; }
+  input:focus,textarea:focus { border-color:var(--accent); }
+  .btn { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:10px 16px; }
+  .btn.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+  #auth { display:flex; height:100vh; align-items:center; justify-content:center; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:28px; width:340px; display:flex; flex-direction:column; gap:12px; }
+  .card h1 { font-size:24px; } .card p { color:var(--muted); font-size:14px; }
+  #authErr { color:#ff7b7b; font-size:13px; min-height:16px; }
+  .link { color:var(--accent); background:none; border:0; font-size:13px; }
+  #app { display:none; height:100vh; }
+  aside { width:260px; background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; padding:12px; gap:10px; }
+  #convs { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:4px; }
+  .conv { display:flex; justify-content:space-between; align-items:center; padding:9px 10px; border-radius:8px; cursor:pointer; font-size:14px; }
+  .conv:hover,.conv.active { background:var(--user); }
+  .conv span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+  .conv button { background:none; border:0; color:var(--muted); display:none; }
+  .conv:hover button { display:block; }
+  main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #msgs { flex:1; overflow-y:auto; padding:24px 16px; display:flex; flex-direction:column; gap:14px; }
+  .msg { max-width:760px; width:100%; margin:0 auto; display:flex; }
+  .msg.user { justify-content:flex-end; }
+  .bubble { padding:11px 15px; border-radius:14px; line-height:1.55; font-size:15px; max-width:88%; word-wrap:break-word; }
+  .msg.user .bubble { background:var(--user); }
+  .msg.bot .bubble { background:var(--panel); border:1px solid var(--line); }
+  .msg.err .bubble { border-color:#ff7b7b; color:#ff9d9d; }
+  pre { background:#0a0c12; border:1px solid var(--line); border-radius:8px; padding:10px; overflow-x:auto; margin:8px 0; font-size:13px; }
+  code { font-family:Consolas,monospace; font-size:13px; background:#0a0c12; padding:1px 5px; border-radius:4px; }
+  pre code { padding:0; background:none; }
+  #empty { margin:auto; text-align:center; color:var(--muted); }
+  #empty h2 { color:var(--text); margin-bottom:6px; }
+  form { display:flex; gap:10px; padding:14px 16px; border-top:1px solid var(--line); max-width:792px; width:100%; margin:0 auto; }
+  form textarea { flex:1; resize:none; max-height:160px; }
+  #me { font-size:13px; color:var(--muted); display:flex; justify-content:space-between; align-items:center; }
+  @media (max-width:700px){ aside{display:none;} }
+</style>
+</head>
+<body>
+
+<div id="auth">
+  <div class="card">
+    <h1>Lav</h1>
+    <p id="authSub">Sign in to chat with your AI dev companion.</p>
+    <input id="u" placeholder="Username" autocomplete="username">
+    <input id="e" placeholder="Email" type="email" style="display:none">
+    <input id="p" placeholder="Password" type="password" autocomplete="current-password">
+    <div id="authErr"></div>
+    <button class="btn" id="authBtn">Sign in</button>
+    <button class="link" id="toggle">No account? Register</button>
+  </div>
+</div>
+
+<div id="app">
+  <aside>
+    <button class="btn" id="newChat">+ New chat</button>
+    <div id="convs"></div>
+    <div id="me"><span id="meName"></span><button class="link" id="logout">Logout</button></div>
+  </aside>
+  <main>
+    <div id="msgs"></div>
+    <form id="form">
+      <textarea id="input" rows="1" placeholder="Ask Lav anything... (Enter = send, Shift+Enter = new line)"></textarea>
+      <button class="btn" id="send">Send</button>
+    </form>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let access = localStorage.getItem('lav_access'), refresh = localStorage.getItem('lav_refresh');
+let currentId = null, ws = null, busy = false, registerMode = false, botEl = null, botText = '';
+
+// ---------- helpers ----------
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function render(text){
+  let html = esc(text);
+  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_,l,c)=>`<pre><code>${c.replace(/\n$/,'')}</code></pre>`);
+  html = html.replace(/`([^`\n]+)`/g,'<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>');
+  return html.split(/(<pre>[\s\S]*?<\/pre>)/).map(p => p.startsWith('<pre>') ? p : p.replace(/\n/g,'<br>')).join('');
+}
+function saveTokens(a, r){
+  access = a; if (r) refresh = r;
+  localStorage.setItem('lav_access', access); if (r) localStorage.setItem('lav_refresh', refresh);
+}
+async function refreshToken(){
+  if (!refresh) return false;
+  const r = await fetch('/api/auth/refresh/', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({refresh})});
+  if (!r.ok) return false;
+  const d = await r.json(); saveTokens(d.access, d.refresh); return true;
+}
+async function api(path, opts={}, retry=true){
+  const r = await fetch(path, {...opts, headers:{'Content-Type':'application/json', Authorization:'Bearer '+access, ...(opts.headers||{})}});
+  if (r.status === 401 && retry && await refreshToken()) return api(path, opts, false);
+  if (r.status === 401) { logout(); throw new Error('Session expired'); }
+  return r;
+}
+
+// ---------- auth ----------
+$('toggle').onclick = () => {
+  registerMode = !registerMode;
+  $('e').style.display = registerMode ? 'block' : 'none';
+  $('authBtn').textContent = registerMode ? 'Create account' : 'Sign in';
+  $('toggle').textContent = registerMode ? 'Have an account? Sign in' : 'No account? Register';
+  $('authErr').textContent = '';
+};
+$('authBtn').onclick = async () => {
+  $('authErr').textContent = '';
+  const body = {username:$('u').value.trim(), password:$('p').value};
+  if (registerMode) body.email = $('e').value.trim();
+  try {
+    const r = await fetch(registerMode ? '/api/auth/register/' : '/api/auth/login/', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const d = await r.json();
+    if (!r.ok) { $('authErr').textContent = Object.values(d).flat().join(' ') || 'Failed'; return; }
+    saveTokens(d.access, d.refresh); start();
+  } catch(e){ $('authErr').textContent = 'Cannot reach server.'; }
+};
+function logout(){
+  localStorage.removeItem('lav_access'); localStorage.removeItem('lav_refresh');
+  access = refresh = null; if (ws) ws.close(); location.reload();
+}
+$('logout').onclick = logout;
+
+// ---------- chat ----------
+async function start(){
+  const r = await api('/api/auth/me/'); const me = await r.json();
+  $('auth').style.display = 'none'; $('app').style.display = 'flex'; $('meName').textContent = me.username;
+  await loadConvs(); newChat();
+}
+async function loadConvs(){
+  const list = await (await api('/api/chat/conversations/')).json();
+  $('convs').innerHTML = '';
+  list.forEach(c => {
+    const el = document.createElement('div'); el.className = 'conv' + (c.id === currentId ? ' active' : '');
+    el.innerHTML = `<span>${esc(c.title)}</span><button title="Delete">x</button>`;
+    el.onclick = () => openConv(c.id);
+    el.querySelector('button').onclick = async e => {
+      e.stopPropagation(); await api(`/api/chat/conversations/${c.id}/`, {method:'DELETE'});
+      if (c.id === currentId) newChat(); loadConvs();
+    };
+    $('convs').appendChild(el);
+  });
+}
+function newChat(){
+  currentId = null; if (ws) { ws.close(); ws = null; }
+  $('msgs').innerHTML = '<div id="empty"><h2>Hey, I\'m Lav</h2><p>Paste an error, ask about Django, or just chat.</p></div>';
+  loadConvs();
+}
+$('newChat').onclick = newChat;
+
+function addMsg(role, text, cls=''){
+  const empty = $('empty'); if (empty) empty.remove();
+  const row = document.createElement('div'); row.className = `msg ${role} ${cls}`;
+  const b = document.createElement('div'); b.className = 'bubble'; b.innerHTML = render(text);
+  row.appendChild(b); $('msgs').appendChild(row); $('msgs').scrollTop = $('msgs').scrollHeight;
+  return b;
+}
+async function openConv(id){
+  currentId = id; const d = await (await api(`/api/chat/conversations/${id}/`)).json();
+  $('msgs').innerHTML = ''; d.messages.forEach(m => addMsg(m.role === 'user' ? 'user' : 'bot', m.content));
+  await connect(id); loadConvs();
+}
+async function connect(id){
+  if (ws) ws.close();
+  await refreshToken();  // always connect with a fresh token
+  return new Promise((resolve, reject) => {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws/chat/${id}/?token=${access}`);
+    ws.onopen = resolve;
+    ws.onerror = () => reject(new Error('WebSocket failed'));
+    ws.onmessage = onWsMessage;
+    ws.onclose = () => { if (busy) finish(); };
+  });
+}
+function onWsMessage(ev){
+  const d = JSON.parse(ev.data);
+  if (d.type === 'chunk') { botText += d.text; botEl.innerHTML = render(botText); $('msgs').scrollTop = $('msgs').scrollHeight; }
+  else if (d.type === 'done') { botEl.innerHTML = render(d.full_text); finish(); loadConvs(); }
+  else if (d.type === 'error') { botEl.parentElement.classList.add('err'); botEl.textContent = 'Error: ' + d.detail; finish(); }
+}
+function finish(){ busy = false; $('send').disabled = false; $('input').focus(); }
+
+async function send(){
+  const text = $('input').value.trim(); if (!text || busy) return;
+  busy = true; $('send').disabled = true; $('input').value = ''; $('input').style.height = 'auto';
+  try {
+    if (!currentId) {
+      const c = await (await api('/api/chat/conversations/', {method:'POST', body:JSON.stringify({})})).json();
+      currentId = c.id;
+    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) await connect(currentId);
+    addMsg('user', text); botText = ''; botEl = addMsg('bot', '...');
+    ws.send(JSON.stringify({message:text}));
+  } catch(e){ addMsg('bot', 'Error: ' + e.message, 'err'); finish(); }
+}
+$('form').onsubmit = e => { e.preventDefault(); send(); };
+$('input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+$('input').addEventListener('input', e => { e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; });
+$('p').addEventListener('keydown', e => { if (e.key === 'Enter') $('authBtn').click(); });
+
+if (access) start().catch(() => {});
+</script>
+</body>
+</html>

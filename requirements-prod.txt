@@ -1,0 +1,3 @@
+# Only needed if you switch to PostgreSQL / Redis (production)
+psycopg2-binary>=2.9.10
+channels-redis>=4.2
